@@ -16,7 +16,7 @@ from . import path, directory
 from .makes_mappings import makes_mapping
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-file_path = os.path.join(BASE_DIR, 'rvp_crawlers/all_makes.xlsx')
+file_path = os.path.join(BASE_DIR, 'docker/all_makes.xlsx')
 
 
 class RVPipeline(object):
@@ -40,9 +40,9 @@ class RVPipeline(object):
         """
         self.mydb = mysql.connector.connect(
             host="localhost",
-            user="datics",
-            password="topway",
-            database="v3",
+            user="sheraz",
+            password="sheraz_123#",
+            database="testing",
             charset='utf8',
             use_unicode=True)
 
@@ -270,9 +270,10 @@ class RVPipeline(object):
 
                         rv_id = self.cursor.fetchall()
 
-                        if len(rv_id) == 0:  # if rv not in DataBase
-                            query = "INSERT INTO rv (title, status, year, date, updated_at, added_at) VALUES(%s, %s, %s, %s, %s, %s)"
-                            
+                        if len(rv_id) == 0:  # if RV not in DataBase
+                            query = "INSERT INTO RV (title," \
+                                    "status, year, date, updated_at, added_at)" \
+                                    "VALUES(%s, %s, %s, %s, %s, %s)"
                             args = (updated_title, status, rv_year, date, now, now)
                             self.cursor.execute(query, args)
                             rv_id = self.cursor.lastrowid
