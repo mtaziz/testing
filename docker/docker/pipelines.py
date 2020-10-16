@@ -1,6 +1,7 @@
 """
 Required modules to run this file
 """
+import re
 import datetime
 import logging
 import os
@@ -22,35 +23,40 @@ class RVPipeline(object):
     """
     This class stores the scrapped data in database models
     """
+            
     vendorName = ''
     flag = False
     mydb = None
     cursor = None
     start_time = None
-
+    domain = None
+    map_makes = {}
+    sorted_dict = {}
+    
     def open_spider(self, spider):
         """
         stores the starts database connection, spider status and spider logs info
         :param spider:
         """
         self.mydb = mysql.connector.connect(
-            host="172.21.0.2",
-            user="rvp_user",
+            host="localhost",
+            user="datics",
             password="topway",
-            database="rvp_db",
+            database="v3",
             charset='utf8',
             use_unicode=True)
 
         self.cursor = self.mydb.cursor(prepared=True)
         self.cursor = self.mydb.cursor(buffered=True)
 
-        spider.logger.info('Spider opened: %s', spider.name)
-
         date = datetime.datetime.today()
         now = datetime.datetime.utcnow()
         self.start_time = now
 
-        filename = f'{spider.name}.txt'
+        domain = spider.start_urls[0]
+        domain = domain.split('/')[2]
+    
+        filename = f'{domain}.txt'
         log_file = os.path.join(path, filename)
 
         root_logger = logging.getLogger()
@@ -64,7 +70,7 @@ class RVPipeline(object):
         root_logger.addHandler(rotating_file_log)
 
         root_logger_1 = logging.getLogger()
-        root_logger_1.setLevel(logging.DEBUG)
+        root_logger_1.setLevel(logging.INFO)
         formatter_1 = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         rotating_file_log_1 = RotatingFileHandler(log_file, maxBytes=10485760,
@@ -73,14 +79,15 @@ class RVPipeline(object):
         rotating_file_log_1.setFormatter(formatter_1)
         root_logger_1.addHandler(rotating_file_log_1)
 
-        query = "SELECT * FROM RV_Logs WHERE start_time = %s AND " \
+        spider.logger.info('Spider opened with domain: %s', spider.domains)
+        query = "SELECT * FROM rv_logs WHERE start_time = %s AND " \
                 "scraper_name = %s"
         self.cursor.execute(query, (now, spider.name))
 
         rvlogs_id = self.cursor.fetchone()
         direc = directory + '/' + filename
         if rvlogs_id is None:  # if spider not in rvlogs
-            query = "INSERT INTO RV_Logs (scraper_name, start_time, end_time, \
+            query = "INSERT INTO rv_logs (scraper_name, start_time, end_time, \
             status, data_count, error_count, updated_at, added_at, date, logs)" \
                     "VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 
@@ -89,6 +96,29 @@ class RVPipeline(object):
 
         self.mydb.commit()
 
+    def do_mapping(self, dict_data, title):
+        
+        copy = title.lower().replace(',', ' ').replace('®', ' ').replace('=', 
+            ' ').replace("  ", " ").replace("?", " ").replace("**", " ").replace("*", 
+            " ").replace('"', "").replace('(', '').replace(')', '')
+
+        copy = copy.replace("!", ' ').replace("™", '').split(" - ")[0].replace(" -", 
+            "").replace("`", " ").strip()
+
+        copy = copy.replace("'", ' ').replace('"', ' ').replace("’", ' ').replace("+", 
+            ' ').replace('”', ' ').replace("′", " ").replace("’s", " ").replace("”", 
+            " ").replace("“", " ").replace('″', ' ').replace('  ', ' ').strip()
+                            
+        for key, val in dict_data.items():
+            for v in val:
+                if re.search(r'\b' + v + r'\b', copy):
+                    if (copy.replace(v, key)) != copy:
+                        copy = copy.replace(v, key).lower().replace('   ', ' ').replace('  ', 
+                                                                                ' ').strip()
+        
+        title = ' '.join(list(dict.fromkeys(copy.split())))
+        return title
+    
     def read_mappings(self, mapping):
         """
         read data from excel file and update knowledge base of rv_makes
@@ -102,7 +132,7 @@ class RVPipeline(object):
             if m not in mapping:
                 mapping[m] = []
 
-        return list(mapping)
+        return mapping
 
     def insert_makes(self, makes, date, now):
         """
@@ -116,7 +146,7 @@ class RVPipeline(object):
         makes = list(set(makes))
         makes.sort()
 
-        query = "SELECT * FROM RV_Makes"
+        query = "SELECT * FROM rv_makes"
         self.cursor.execute(query)
 
         rv_makes = self.cursor.fetchall()
@@ -124,14 +154,14 @@ class RVPipeline(object):
         
         for make in makes:
             if make not in res:
-                query = "INSERT INTO RV_Makes (make, date, updated_at, " \
+                query = "INSERT IGNORE INTO rv_makes (make, date, updated_at, " \
                         "added_at) VALUES(%s, %s, %s, %s)"
                 args = (make, date, now, now)
                 self.cursor.execute(query, args)
-
                 rv_makes = self.cursor.lastrowid
-
+            
         self.mydb.commit()
+                
         return makes
 
     def process_item(self, item, spider):
@@ -147,33 +177,53 @@ class RVPipeline(object):
         vendor_id = None
 
         if not self.flag:
-            makes = self.read_mappings(makes_mapping)
-            insert_makes = self.insert_makes(makes, date, now)
+            self.map_makes = self.read_mappings(makes_mapping)
+            self.sorted_dict = {k: self.map_makes[k] for k in sorted(self.map_makes)}
+            makes = list(self.map_makes)
+            all_makes = self.insert_makes(makes, date, now)
             self.flag = True
 
+        query = "SELECT * FROM spider WHERE name = %s"
+        self.cursor.execute(query, (spider.name,))
+        spider_id = self.cursor.fetchone()
+        
+        if spider_id is None:  # if current spider not in DataBase
+                query = "INSERT INTO spider (name, date," \
+                        "updated_at, added_at) " \
+                        "VALUES(%s, %s, %s, %s)"
+
+                args = (spider.name, date, now, now)
+                self.cursor.execute(query, args)
+                spider_id = self.cursor.lastrowid
+                self.mydb.commit()
+        else:
+            spider_id = spider_id[0]
+                    
         if item['vendor_name']:
             self.vendorName = item['vendor_name']
             vendor_website = item['vendor_website']
+            vendor_start_url = spider.start_urls[0]
 
-            query = "SELECT * FROM Vendors WHERE name = %s"
-            self.cursor.execute(query, (self.vendorName,))
-
+            query = "SELECT * FROM vendors WHERE name = %s AND start_url = %s"
+            # self.cursor.execute(query, (self.vendorName,))
+            args = (self.vendorName, vendor_start_url)
+            self.cursor.execute(query, args)
             vendor_id = self.cursor.fetchone()
 
-            if vendor_id is None:  # if vendor not in DataBase
-                query = "INSERT INTO Vendors (name, website, date, " \
+            if vendor_id is None:
+                query = "INSERT INTO vendors (spider_id, name, website, start_url, date, " \
                         "updated_at, added_at) " \
-                        "VALUES(%s, %s, %s, %s, %s)"
+                        "VALUES(%s, %s, %s, %s, %s, %s, %s)"
 
-                args = (self.vendorName, vendor_website, date, now, now)
+                args = (spider_id, self.vendorName, vendor_website, vendor_start_url, 
+                        date, now, now)
                 self.cursor.execute(query, args)
 
                 vendor_id = self.cursor.lastrowid
-
+                self.mydb.commit()
+                
             else:
                 vendor_id = vendor_id[0]
-
-            self.mydb.commit()
 
         else:
             raise DropItem("Missing Vendor Name %s" % item)
@@ -201,50 +251,41 @@ class RVPipeline(object):
                         rv_year = year
                         status = 0
 
+                        updated_title = self.do_mapping(self.map_makes, title) #map makes
+                        
                         rv_status = (rv_status.lower() + ' ')
-                        updated_title = title.replace(my_status, '').replace(
-                            rv_year, '').strip()
-
-                        copy = updated_title.replace(',', ' ').replace('®', ' ').replace(
-                            '=', ' ').replace("  ", " ").replace("?", " ").replace(
-                            "**", " ").replace("*", " ").replace(". ", " ").replace(
-                            '"', "").replace('(', '').replace(')', '').strip()
-
-                        copy = copy.replace("!", ' ').replace("™", '').split(" - ")[
-                            0].replace(" -", "").replace("`", " ")
-
-                        copy = copy.replace("'", ' ').replace('"', ' ').replace("’", ' ').replace(
-                            "+", ' ').replace('”', ' ').replace("′", " ").replace(
-                            "’s", " ").replace("”", " ").replace("“", " ").replace(
-                            '″', ' ').replace('  ', ' ').strip()
-
-                        updated_title = copy
-
+                        updated_title = updated_title.replace(rv_status, '').replace(
+                            rv_year, '').replace('  ', ' ').strip()
+                        
                         if my_status.lower() == 'new':
                             status = 1
 
                         elif my_status.lower() == 'used':
                             status = 2
 
-                        query = "SELECT * FROM RV WHERE title = %s AND " \
-                                "status= %s and year = %s"
+                        query = "SELECT * FROM rv WHERE title = %s AND " \
+                                "status = %s and year = %s"
                         args = (updated_title, status, rv_year)
                         self.cursor.execute(query, args)
 
                         rv_id = self.cursor.fetchall()
 
-                        if len(rv_id) == 0:  # if RV not in DataBase
-                            query = "INSERT INTO RV (vendor_id, title," \
-                                    "status, year, date, updated_at, added_at)" \
-                                    "VALUES(%s, %s, %s, %s, %s, %s, %s)"
-                            args = (vendor_id, updated_title, status, rv_year, date, now, now)
+                        if len(rv_id) == 0:  # if rv not in DataBase
+                            query = "INSERT INTO rv (title, status, year, date, updated_at, added_at) VALUES(%s, %s, %s, %s, %s, %s)"
+                            
+                            args = (updated_title, status, rv_year, date, now, now)
                             self.cursor.execute(query, args)
                             rv_id = self.cursor.lastrowid
-
+                            self.mydb.commit()
+                            
+                            query = "INSERT INTO rv_vendor (rv_id, vendor_id, date) VALUES(%s, %s, %s)";
+                            
+                            args = (rv_id, vendor_id, date)
+                            self.cursor.execute(query, args)
+                            self.mydb.commit()
+                            
                         else:
                             rv_id = rv_id[0][0]
-
-                        self.mydb.commit()
 
                         if item.get('sale_price_call'):
                             sale_price_call = item['sale_price_call']
@@ -337,7 +378,7 @@ class RVPipeline(object):
                         rv_fuel_capacity = item.get('rv_fuel_capacity')
                         rv_manufacturer = item.get('rv_manufacturer')
 
-                        query = '''INSERT INTO RV_Details (url, location, length, retail_price, 
+                        query = '''INSERT INTO rv_details (url, location, length, retail_price, 
                         sale_price, monthly_price,discount, min_price, max_price, average_price, 
                         stock_no, vin, sale_price_call, best_price_call, best_price_call_no, 
                         rv_class, monthly_price_disclaimer, rv_transmission, 
@@ -390,8 +431,8 @@ class RVPipeline(object):
         stats = spider.crawler.stats.get_stats()
         error = stats.get('log_count/ERROR', 0)
         scrapped_count = stats.get('item_scraped_count', 0)
-        spider.logger.info('Spider closed: %s', spider.name)
-
+        spider.logger.info('Spider closed with domain: %s', spider.domains)
+        
         status = 0
 
         if error == 0 and scrapped_count > 0:
@@ -400,13 +441,13 @@ class RVPipeline(object):
         elif error == 0 and scrapped_count == 0:
             status = 2
 
-        elif (error > 0 and scrapped_count > 0) and (error < scrapped_count):
+        elif (error > 0 and scrapped_count > 0) and (error <= scrapped_count):
             status = 2
 
         elif (scrapped_count == 0 and error > 0) or (error > scrapped_count):
             status = 4
 
-        query = "SELECT * FROM Vendors WHERE name = %s"
+        query = "SELECT * FROM vendors WHERE name = %s"
         self.cursor.execute(query, (self.vendorName,))
         vendor = self.cursor.fetchone()
 
@@ -415,7 +456,7 @@ class RVPipeline(object):
             vendor = None
 
         if status == 1:
-            rvlogs = "UPDATE RV_Logs SET vendor_id = %s, status = %s, error_count = %s, " \
+            rvlogs = "UPDATE rv_logs SET vendor_id = %s, status = %s, error_count = %s, " \
                      "data_count = %s, end_time = %s, last_run= %s where scraper_name = %s and " \
                      "start_time = %s "
             val = (vendor[0], status, error, scrapped_count,
@@ -426,7 +467,7 @@ class RVPipeline(object):
 
         else:
             if vendor:
-                rvlogs = "UPDATE RV_Logs SET vendor_id = %s, status = %s, error_count = %s, " \
+                rvlogs = "UPDATE rv_logs SET vendor_id = %s, status = %s, error_count = %s, " \
                          "data_count = %s, end_time = %s where scraper_name = %s and start_time " \
                          "= %s "
                 val = (vendor[0], status, error, scrapped_count,
@@ -436,7 +477,7 @@ class RVPipeline(object):
                 self.cursor.execute(rvlogs, val)
 
             else:
-                rvlogs = "UPDATE RV_Logs SET vendor_id = %s, status = %s, error_count = %s, " \
+                rvlogs = "UPDATE rv_logs SET vendor_id = %s, status = %s, error_count = %s, " \
                          "data_count = %s, end_time = %s where scraper_name = %s and start_time " \
                          "= %s "
                 val = (vendor, status, error, scrapped_count,
